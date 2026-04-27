@@ -1,65 +1,558 @@
-export default function Home() {
+import { revalidatePath } from "next/cache";
+import { getDeleverAccessToken, resetDeleverAuthCache } from "@/lib/deleverAuth";
+import {
+  searchRestaurants,
+  type RestaurantSummary,
+} from "@/lib/deleverClient";
+import MonitorPanel from "./_components/MonitorPanel";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+interface AuthProbe {
+  ok: boolean;
+  latencyMs: number;
+  tokenPreview?: string;
+  error?: string;
+}
+
+interface RestaurantsProbe {
+  ok: boolean;
+  latencyMs: number;
+  restaurants: RestaurantSummary[];
+  error?: string;
+}
+
+async function probeAuth(useMocks: boolean): Promise<AuthProbe> {
+  if (useMocks) {
+    return { ok: true, latencyMs: 0, tokenPreview: "—" };
+  }
+  const start = Date.now();
+  try {
+    resetDeleverAuthCache();
+    const token = await getDeleverAccessToken();
+    return {
+      ok: true,
+      latencyMs: Date.now() - start,
+      tokenPreview: `${token.slice(0, 6)}…${token.slice(-4)} (${token.length} chars)`,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - start,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+async function probeRestaurants(): Promise<RestaurantsProbe> {
+  const start = Date.now();
+  try {
+    const restaurants = await searchRestaurants({ language: "ru" });
+    return { ok: true, latencyMs: Date.now() - start, restaurants };
+  } catch (err) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - start,
+      restaurants: [],
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+async function refreshAction() {
+  "use server";
+  resetDeleverAuthCache();
+  revalidatePath("/");
+}
+
+function maskClientId(value: string | undefined): string {
+  if (!value) return "—";
+  if (value.length <= 8) return "********";
+  return `${value.slice(0, 4)}…${value.slice(-4)} (${value.length})`;
+}
+
+function maskSecret(value: string | undefined): string {
+  if (!value) return "—";
+  return `••••••••••••••••••••••••••••••••${value.slice(-4)}`;
+}
+
+export default async function Home() {
   const useMocks = process.env.USE_MOCKS !== "false";
-  const mode = useMocks ? "MOCKS" : "LIVE Delever API";
+  const baseUrl = process.env.DELEVER_BASE_URL || "—";
+  const clientId = process.env.DELEVER_CLIENT_ID;
+  const clientSecret = process.env.DELEVER_CLIENT_SECRET;
+  const oauthPath = process.env.DELEVER_OAUTH_PATH || "/security/oauth/token";
+
+  const auth = await probeAuth(useMocks);
+  const restaurants = auth.ok ? await probeRestaurants() : null;
+
+  const mode = useMocks ? "MOCKS" : "LIVE";
+  const modeColor = useMocks ? "#f59e0b" : "#10b981";
+  const onlineCount = restaurants?.restaurants.filter((r) => r.online).length ?? 0;
 
   return (
     <main
       style={{
-        maxWidth: 720,
+        maxWidth: 980,
         margin: "0 auto",
-        padding: "64px 24px",
-        lineHeight: 1.6,
+        padding: "48px 24px 80px",
+        lineHeight: 1.55,
       }}
     >
-      <h1 style={{ fontSize: 36, marginBottom: 8 }}>Delever MCP Bridge</h1>
-      <p style={{ opacity: 0.75, marginTop: 0 }}>
-        Streamable HTTP MCP server that exposes Delever ordering tools to
-        Claude.
-      </p>
+      <header
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 16,
+          flexWrap: "wrap",
+          marginBottom: 8,
+        }}
+      >
+        <div>
+          <h1 style={{ fontSize: 36, margin: 0, letterSpacing: -0.5 }}>
+            Delever MCP Bridge
+          </h1>
+          <p style={{ opacity: 0.65, margin: "4px 0 0" }}>
+            Streamable HTTP MCP server, proxying Claude → Delever Ordering API V2.
+          </p>
+        </div>
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "8px 14px",
+            borderRadius: 999,
+            background: `${modeColor}22`,
+            border: `1px solid ${modeColor}`,
+            color: modeColor,
+            fontWeight: 600,
+            fontSize: 13,
+            letterSpacing: 0.4,
+          }}
+        >
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: 999,
+              background: modeColor,
+              boxShadow: `0 0 12px ${modeColor}`,
+            }}
+          />
+          {mode}
+        </span>
+      </header>
 
       <section style={{ marginTop: 32 }}>
-        <h2 style={{ fontSize: 20, marginBottom: 8 }}>Status</h2>
-        <ul>
-          <li>
-            Mode: <strong>{mode}</strong>
-          </li>
-          <li>
-            MCP endpoint: <code>/api/mcp</code>
-          </li>
-          <li>
-            SSE endpoint (legacy clients): <code>/api/sse</code>
-          </li>
-        </ul>
+        <SectionTitle>Connectivity</SectionTitle>
+        <Grid>
+          <Card title="OAuth handshake">
+            <StatusRow
+              label="Status"
+              ok={auth.ok}
+              okLabel={useMocks ? "Skipped (mocks)" : "OK"}
+              failLabel="FAILED"
+            />
+            <KV k="Endpoint" v={`${baseUrl}${oauthPath}`} />
+            <KV k="Latency" v={auth.latencyMs ? `${auth.latencyMs} ms` : "—"} />
+            <KV k="Token" v={auth.tokenPreview || "—"} />
+            {auth.error && <ErrorBox text={auth.error} />}
+          </Card>
+
+          <Card title="Configuration">
+            <KV k="USE_MOCKS" v={useMocks ? "true" : "false"} />
+            <KV k="DELEVER_BASE_URL" v={baseUrl} />
+            <KV k="DELEVER_CLIENT_ID" v={maskClientId(clientId)} />
+            <KV k="DELEVER_CLIENT_SECRET" v={maskSecret(clientSecret)} />
+            <KV k="DELEVER_OAUTH_PATH" v={oauthPath} />
+          </Card>
+        </Grid>
       </section>
 
       <section style={{ marginTop: 32 }}>
-        <h2 style={{ fontSize: 20, marginBottom: 8 }}>Connect to Claude</h2>
-        <p>
-          In Claude.ai go to Settings → Connectors → Add custom connector and
-          paste the URL of this deployment with <code>/api/mcp</code> appended.
+        <SectionTitle>Monitoring</SectionTitle>
+        <p style={{ opacity: 0.55, marginTop: 0, fontSize: 13 }}>
+          Live feed of every Delever HTTP call, OAuth handshake and MCP tool
+          invocation. Auto-refreshes every 2&nbsp;seconds. Buffer is in-memory
+          and resets on cold start.
         </p>
+        <MonitorPanel />
       </section>
 
-      <section style={{ marginTop: 32 }}>
-        <h2 style={{ fontSize: 20, marginBottom: 8 }}>Tools exposed</h2>
-        <ul>
+      <section style={{ marginTop: 40 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: 12,
+          }}
+        >
+          <SectionTitle inline>Restaurants</SectionTitle>
+          <form action={refreshAction}>
+            <button
+              type="submit"
+              style={{
+                background: "transparent",
+                color: "#a3a3a3",
+                border: "1px solid #2a2a2a",
+                padding: "6px 12px",
+                borderRadius: 8,
+                cursor: "pointer",
+                fontSize: 12,
+                letterSpacing: 0.4,
+              }}
+            >
+              ↻ Refresh
+            </button>
+          </form>
+        </div>
+
+        {restaurants ? (
+          restaurants.ok ? (
+            <>
+              <p style={{ opacity: 0.6, marginTop: 0, fontSize: 13 }}>
+                {restaurants.restaurants.length} total · {onlineCount} online ·{" "}
+                fetched in {restaurants.latencyMs} ms
+              </p>
+              {restaurants.restaurants.length === 0 ? (
+                <EmptyState text="No restaurants returned by the API." />
+              ) : (
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns:
+                      "repeat(auto-fill, minmax(280px, 1fr))",
+                    gap: 12,
+                  }}
+                >
+                  {restaurants.restaurants.map((r) => (
+                    <RestaurantCard key={r.id} r={r} />
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <ErrorBox text={restaurants.error || "Unknown error"} />
+          )
+        ) : (
+          <EmptyState text="Skipped — fix OAuth first." />
+        )}
+      </section>
+
+      <section style={{ marginTop: 40 }}>
+        <SectionTitle>MCP Endpoints</SectionTitle>
+        <Grid>
+          <Card title="Streamable HTTP">
+            <code style={codeStyle}>/api/mcp</code>
+            <p style={{ opacity: 0.6, fontSize: 13, marginTop: 8 }}>
+              Use this URL in Claude.ai → Settings → Connectors → Add custom
+              connector.
+            </p>
+          </Card>
+          <Card title="SSE (legacy clients)">
+            <code style={codeStyle}>/api/sse</code>
+            <p style={{ opacity: 0.6, fontSize: 13, marginTop: 8 }}>
+              Older MCP clients without Streamable HTTP support.
+            </p>
+          </Card>
+        </Grid>
+      </section>
+
+      <section style={{ marginTop: 40 }}>
+        <SectionTitle>Tools exposed</SectionTitle>
+        <ul style={{ margin: 0, paddingLeft: 20, opacity: 0.85 }}>
           <li>
-            <code>search_restaurants</code>
+            <code style={inlineCodeStyle}>search_restaurants</code>
           </li>
           <li>
-            <code>get_menu</code>
+            <code style={inlineCodeStyle}>get_menu</code>
           </li>
           <li>
-            <code>create_order</code>
+            <code style={inlineCodeStyle}>create_order</code>
           </li>
           <li>
-            <code>get_order_status</code>
+            <code style={inlineCodeStyle}>get_order_status</code>
           </li>
           <li>
-            <code>cancel_order</code>
+            <code style={inlineCodeStyle}>cancel_order</code>
           </li>
         </ul>
       </section>
     </main>
   );
 }
+
+/* ------------------------------ UI atoms ------------------------------- */
+
+function SectionTitle({
+  children,
+  inline,
+}: {
+  children: React.ReactNode;
+  inline?: boolean;
+}) {
+  return (
+    <h2
+      style={{
+        fontSize: 14,
+        fontWeight: 600,
+        textTransform: "uppercase",
+        letterSpacing: 1.2,
+        color: "#a3a3a3",
+        margin: inline ? 0 : "0 0 12px",
+      }}
+    >
+      {children}
+    </h2>
+  );
+}
+
+function Grid({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+        gap: 12,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Card({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        border: "1px solid #1f1f1f",
+        background: "#111",
+        borderRadius: 12,
+        padding: 16,
+      }}
+    >
+      <div
+        style={{
+          fontSize: 12,
+          textTransform: "uppercase",
+          letterSpacing: 1,
+          color: "#737373",
+          marginBottom: 10,
+        }}
+      >
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function KV({ k, v }: { k: string; v: string }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        gap: 12,
+        padding: "4px 0",
+        fontSize: 13,
+        borderBottom: "1px dashed #1f1f1f",
+      }}
+    >
+      <span style={{ opacity: 0.6 }}>{k}</span>
+      <span
+        style={{
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          textAlign: "right",
+          wordBreak: "break-all",
+        }}
+      >
+        {v}
+      </span>
+    </div>
+  );
+}
+
+function StatusRow({
+  label,
+  ok,
+  okLabel,
+  failLabel,
+}: {
+  label: string;
+  ok: boolean;
+  okLabel: string;
+  failLabel: string;
+}) {
+  const color = ok ? "#10b981" : "#ef4444";
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        padding: "4px 0",
+        fontSize: 13,
+        borderBottom: "1px dashed #1f1f1f",
+      }}
+    >
+      <span style={{ opacity: 0.6 }}>{label}</span>
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          color,
+          fontWeight: 600,
+        }}
+      >
+        <span
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: 999,
+            background: color,
+            boxShadow: `0 0 8px ${color}`,
+          }}
+        />
+        {ok ? okLabel : failLabel}
+      </span>
+    </div>
+  );
+}
+
+function ErrorBox({ text }: { text: string }) {
+  return (
+    <pre
+      style={{
+        marginTop: 12,
+        padding: 10,
+        background: "#2a0d0d",
+        border: "1px solid #5c1a1a",
+        borderRadius: 8,
+        color: "#fca5a5",
+        fontSize: 12,
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+      }}
+    >
+      {text}
+    </pre>
+  );
+}
+
+function EmptyState({ text }: { text: string }) {
+  return (
+    <div
+      style={{
+        padding: 24,
+        textAlign: "center",
+        border: "1px dashed #2a2a2a",
+        borderRadius: 12,
+        color: "#737373",
+        fontSize: 14,
+      }}
+    >
+      {text}
+    </div>
+  );
+}
+
+function RestaurantCard({ r }: { r: RestaurantSummary }) {
+  const dotColor = r.online ? "#10b981" : "#525252";
+  return (
+    <div
+      style={{
+        border: "1px solid #1f1f1f",
+        background: "#111",
+        borderRadius: 12,
+        padding: 14,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          marginBottom: 6,
+        }}
+      >
+        <strong
+          style={{
+            fontSize: 14,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {r.name || r.id}
+        </strong>
+        <span
+          title={r.online ? "online" : "offline"}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            color: dotColor,
+            fontSize: 11,
+            fontWeight: 600,
+            letterSpacing: 0.4,
+          }}
+        >
+          <span
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: 999,
+              background: dotColor,
+              boxShadow: r.online ? `0 0 8px ${dotColor}` : "none",
+            }}
+          />
+          {r.online ? "ONLINE" : "OFFLINE"}
+        </span>
+      </div>
+      <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+        {r.address || "—"}
+      </div>
+      <div
+        style={{
+          fontSize: 11,
+          opacity: 0.5,
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        }}
+      >
+        {r.id} · {r.lat.toFixed(4)}, {r.lng.toFixed(4)}
+      </div>
+    </div>
+  );
+}
+
+const codeStyle: React.CSSProperties = {
+  display: "inline-block",
+  padding: "6px 10px",
+  borderRadius: 6,
+  background: "#1a1a1a",
+  border: "1px solid #2a2a2a",
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+  fontSize: 13,
+};
+
+const inlineCodeStyle: React.CSSProperties = {
+  padding: "1px 6px",
+  borderRadius: 4,
+  background: "#1a1a1a",
+  border: "1px solid #2a2a2a",
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+  fontSize: 12,
+};

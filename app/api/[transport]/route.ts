@@ -31,6 +31,7 @@ import {
   type LangCode,
   type PaymentType,
 } from "@/lib/deleverClient";
+import { logEvent } from "@/lib/eventLog";
 
 const langEnum = z.enum(["ru", "en", "uz"]);
 const paymentEnum = z.enum(["CARD", "CASH"]);
@@ -123,6 +124,43 @@ function asError(error: unknown): CallToolResult {
   };
 }
 
+/**
+ * Wrap a tool handler so every invocation is recorded in the monitor log
+ * (input, output, latency, error). Underlying Delever HTTP calls are also
+ * logged independently inside `lib/deleverClient.ts`, so a single MCP call
+ * may produce multiple monitor events — that's intentional.
+ */
+function tracedTool<TArgs>(
+  toolName: string,
+  fn: (args: TArgs) => Promise<unknown>
+) {
+  return async (args: TArgs): Promise<CallToolResult> => {
+    const start = Date.now();
+    try {
+      const data = await fn(args);
+      logEvent({
+        kind: "mcp_tool",
+        label: toolName,
+        ok: true,
+        latencyMs: Date.now() - start,
+        request: args,
+        response: data,
+      });
+      return asJsonResult(data);
+    } catch (error) {
+      logEvent({
+        kind: "mcp_tool",
+        label: toolName,
+        ok: false,
+        latencyMs: Date.now() - start,
+        request: args,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return asError(error);
+    }
+  };
+}
+
 const handler = createMcpHandler(
   (server) => {
     server.registerTool(
@@ -151,14 +189,10 @@ const handler = createMcpHandler(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } as any,
       },
-      async (args: SearchRestaurantsArgs): Promise<CallToolResult> => {
-        try {
-          const data = await searchRestaurants(args);
-          return asJsonResult({ count: data.length, restaurants: data });
-        } catch (error) {
-          return asError(error);
-        }
-      }
+      tracedTool<SearchRestaurantsArgs>("search_restaurants", async (args) => {
+        const data = await searchRestaurants(args);
+        return { count: data.length, restaurants: data };
+      })
     );
 
     server.registerTool(
@@ -167,8 +201,9 @@ const handler = createMcpHandler(
         title: "Get restaurant menu",
         description:
           "Fetch the full menu for a restaurant. Returns items with prices, " +
-          "weights, modifiers and an `available` flag (false means item is in " +
-          "the stop list). Always call this before create_order to obtain valid item_ids.",
+          "a `measure`/`measure_unit` pair (e.g. 500/'мл'), modifiers and an " +
+          "`available` flag (false means the item is in the stop list). Always " +
+          "call this before create_order to obtain valid item_ids.",
         inputSchema: {
           restaurant_id: z
             .string()
@@ -180,14 +215,7 @@ const handler = createMcpHandler(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } as any,
       },
-      async (args: GetMenuArgs): Promise<CallToolResult> => {
-        try {
-          const data = await getMenu(args);
-          return asJsonResult(data);
-        } catch (error) {
-          return asError(error);
-        }
-      }
+      tracedTool<GetMenuArgs>("get_menu", (args) => getMenu(args))
     );
 
     server.registerTool(
@@ -213,14 +241,7 @@ const handler = createMcpHandler(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } as any,
       },
-      async (args: CreateOrderArgs): Promise<CallToolResult> => {
-        try {
-          const data = await createOrder(args);
-          return asJsonResult(data);
-        } catch (error) {
-          return asError(error);
-        }
-      }
+      tracedTool<CreateOrderArgs>("create_order", (args) => createOrder(args))
     );
 
     server.registerTool(
@@ -238,14 +259,9 @@ const handler = createMcpHandler(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } as any,
       },
-      async (args: GetOrderStatusArgs): Promise<CallToolResult> => {
-        try {
-          const data = await getOrderStatus(args.order_id);
-          return asJsonResult(data);
-        } catch (error) {
-          return asError(error);
-        }
-      }
+      tracedTool<GetOrderStatusArgs>("get_order_status", (args) =>
+        getOrderStatus(args.order_id)
+      )
     );
 
     server.registerTool(
@@ -264,14 +280,9 @@ const handler = createMcpHandler(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } as any,
       },
-      async (args: CancelOrderArgs): Promise<CallToolResult> => {
-        try {
-          const data = await cancelOrder(args.order_id, args.reason);
-          return asJsonResult(data);
-        } catch (error) {
-          return asError(error);
-        }
-      }
+      tracedTool<CancelOrderArgs>("cancel_order", (args) =>
+        cancelOrder(args.order_id, args.reason)
+      )
     );
   },
   {},

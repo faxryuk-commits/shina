@@ -9,6 +9,7 @@
  */
 
 import { getDeleverAccessToken } from "./deleverAuth";
+import { logEvent } from "./eventLog";
 import {
   MOCK_AVAILABILITY,
   MOCK_MENUS,
@@ -36,11 +37,15 @@ export interface MenuModifierOption {
   id: string;
   name: string;
   price: number;
+  /** Per-option count limits (Delever spec: minAmount/maxAmount). */
+  min_amount?: number;
+  max_amount?: number;
 }
 
 export interface MenuModifier {
   id: string;
   name: string;
+  /** Group-level selection limits (Delever spec: minSelectedModifiers / maxSelectedModifiers). */
   min: number;
   max: number;
   options: MenuModifierOption[];
@@ -52,7 +57,13 @@ export interface MenuItem {
   name: string;
   description: string;
   price: number;
-  weight_g: number;
+  /**
+   * Numeric measure value (Delever `measure`). Interpret in conjunction with
+   * `measure_unit` — could be grams, millilitres, pieces, etc.
+   */
+  measure: number;
+  /** Unit for `measure` (Delever `measureUnit`), e.g. "г", "мл", "шт". */
+  measure_unit: string;
   available: boolean;
   modifiers: MenuModifier[];
 }
@@ -106,6 +117,8 @@ export interface OrderStatusResult {
   order_id: string;
   status: OrderStatus;
   updated_at: string;
+  /** Optional human-readable note from Delever (spec: GetOrderByStatus.comment). */
+  comment?: string;
 }
 
 function isMockMode(): boolean {
@@ -166,9 +179,16 @@ function calcMockTotal(
 /* Real Delever API helpers                                                */
 /* ---------------------------------------------------------------------- */
 
+/**
+ * Default path prefix for all Delever Custom Integration V2 endpoints.
+ * Override with `DELEVER_API_BASE_PATH=` if Delever publishes a different
+ * base path on a future deployment.
+ */
+const DEFAULT_API_BASE_PATH = "/v1/custom-integration";
+
 async function deleverFetch(
   path: string,
-  init: RequestInit = {}
+  init: RequestInit & { acceptType?: string } = {}
 ): Promise<unknown> {
   const baseUrl = (process.env.DELEVER_BASE_URL || "").replace(/\/$/, "");
   if (!baseUrl) {
@@ -176,23 +196,89 @@ async function deleverFetch(
       "DELEVER_BASE_URL is required when USE_MOCKS=false. Set it in env."
     );
   }
+  const apiBasePath = (
+    process.env.DELEVER_API_BASE_PATH ?? DEFAULT_API_BASE_PATH
+  ).replace(/\/$/, "");
+  const fullPath = path.startsWith(apiBasePath) ? path : `${apiBasePath}${path}`;
+
   const token = await getDeleverAccessToken();
   const headers = new Headers(init.headers || {});
   headers.set("Authorization", `Bearer ${token}`);
-  headers.set("Accept", "application/json");
+  headers.set("Accept", init.acceptType || "application/json");
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(`${baseUrl}${path}`, { ...init, headers });
+  const method = (init.method || "GET").toUpperCase();
+  let parsedRequestBody: unknown;
+  if (typeof init.body === "string") {
+    try {
+      parsedRequestBody = JSON.parse(init.body);
+    } catch {
+      parsedRequestBody = init.body;
+    }
+  }
+  const start = Date.now();
+
+  let response: Response;
+  try {
+    const fetchInit: RequestInit = { ...init, headers };
+    delete (fetchInit as { acceptType?: string }).acceptType;
+    response = await fetch(`${baseUrl}${fullPath}`, fetchInit);
+  } catch (err) {
+    logEvent({
+      kind: "delever_http",
+      label: fullPath,
+      method,
+      ok: false,
+      latencyMs: Date.now() - start,
+      request: parsedRequestBody,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+
+  const latencyMs = Date.now() - start;
+  const text = await response.text().catch(() => "");
+  let parsed: unknown = null;
+  if (text) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = text;
+    }
+  }
+
   if (!response.ok) {
-    const text = await response.text().catch(() => "");
+    logEvent({
+      kind: "delever_http",
+      label: fullPath,
+      method,
+      status: response.status,
+      ok: false,
+      latencyMs,
+      request: parsedRequestBody,
+      response: parsed,
+      error: `${response.status} ${response.statusText}`,
+    });
     throw new Error(
-      `Delever API ${path} failed: ${response.status} ${response.statusText} — ${text}`
+      `Delever API ${fullPath} failed: ${response.status} ${response.statusText} — ${text}`
     );
   }
+
+  logEvent({
+    kind: "delever_http",
+    label: fullPath,
+    method,
+    status: response.status,
+    ok: true,
+    latencyMs,
+    request: parsedRequestBody,
+    response: parsed,
+  });
+
   if (response.status === 204) return null;
-  return response.json();
+  return parsed;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -220,35 +306,40 @@ export async function searchRestaurants(
     );
   }
 
+  // Spec: GET /v1/custom-integration/restaurants → { places: GetRestaurantModel[] }
+  // Spec: GET /v1/custom-integration/restaurants/availability → { places: Place[] }
   type ApiRestaurant = {
     id: string;
-    name: Localized | string;
-    address: Localized | string;
-    location?: { lat: number; long: number };
+    title?: string;
+    address?: string;
+    location?: { lat?: number; long?: number };
   };
-  type ApiAvailability = { id: string; enabled: boolean };
+  type ApiRestaurantsList = { places?: ApiRestaurant[] };
+  type ApiPlace = { id: string; enabled: boolean };
+  type ApiAvailabilityList = { places?: ApiPlace[] };
+
+  // Note: GET /restaurants returns plain strings (not localized objects)
+  // per spec, so `lang` is only consumed in the mock branch above.
 
   const [restaurantsRaw, availabilityRaw] = await Promise.all([
-    deleverFetch("/restaurants") as Promise<ApiRestaurant[]>,
-    deleverFetch("/restaurants/availability") as Promise<ApiAvailability[]>,
+    deleverFetch("/restaurants") as Promise<ApiRestaurantsList>,
+    deleverFetch("/restaurants/availability") as Promise<ApiAvailabilityList>,
   ]);
 
   const availability = new Map(
-    (availabilityRaw || []).map((a) => [a.id, a.enabled])
+    (availabilityRaw?.places || []).map((a) => [a.id, a.enabled])
   );
 
-  const summaries = (restaurantsRaw || []).map((r) => ({
-    id: r.id,
-    name:
-      typeof r.name === "string" ? r.name : pickLang(r.name as Localized, lang),
-    address:
-      typeof r.address === "string"
-        ? r.address
-        : pickLang(r.address as Localized, lang),
-    lat: r.location?.lat ?? 0,
-    lng: r.location?.long ?? 0,
-    online: availability.get(r.id) ?? false,
-  }));
+  const summaries = (restaurantsRaw?.places || []).map<RestaurantSummary>(
+    (r) => ({
+      id: r.id,
+      name: r.title || r.id,
+      address: r.address || "",
+      lat: r.location?.lat ?? 0,
+      lng: r.location?.long ?? 0,
+      online: availability.get(r.id) ?? false,
+    })
+  );
 
   return filterRestaurants(summaries, params);
 }
@@ -305,78 +396,116 @@ export async function getMenu(params: GetMenuParams): Promise<MenuResult> {
     return formatMenu(menu, stockMap, lang);
   }
 
-  type ApiCategory = { id: string; parentId: string | null; name: Localized };
-  type ApiModifierOption = { id: string; name: Localized; price: number };
+  // Spec: GET /v1/custom-integration/menu/{restaurantId}/composition
+  //   Content-Type: application/vnd.eats.menu.composition.v2+json
+  //   → CustomIntegrationMenuCompositionV2
+  type ApiCategory = {
+    id: string;
+    parentId?: string;
+    name: Localized;
+    sortOrder?: number;
+  };
   type ApiModifier = {
     id: string;
     name: Localized;
-    min: number;
-    max: number;
-    options: ApiModifierOption[];
+    price?: number;
+    minAmount: number;
+    maxAmount: number;
+  };
+  type ApiModifierGroup = {
+    id: string;
+    name: Localized;
+    minSelectedModifiers: number;
+    maxSelectedModifiers: number;
+    sortOrder?: number;
+    modifiers?: ApiModifier[];
   };
   type ApiItem = {
     id: string;
-    categoryId: string;
+    categoryId?: string;
     name: Localized;
-    description: Localized;
+    description?: string;
     price: number;
-    weight: number;
-    modifiers?: ApiModifier[];
+    measure?: number;
+    measureUnit?: string;
+    sortOrder?: number;
+    modifierGroups?: ApiModifierGroup[];
   };
   type ApiComposition = {
-    categories: ApiCategory[];
-    items: ApiItem[];
+    categories?: ApiCategory[];
+    items?: ApiItem[];
     lastChange?: string;
   };
+  // Spec: GET /v1/custom-integration/menu/{restaurantId}/availability
+  //   → MenuAvailabilityV2 = { items:[{itemId,stock}], modifiers:[{modifierId,stock}] }
   type ApiAvailability = {
-    items?: { id: string; stock: number }[];
-    modifiers?: { id: string; stock: number }[];
+    items?: { itemId: string; stock?: number }[];
+    modifiers?: { modifierId: string; stock?: number }[];
   };
 
+  const restaurantId = encodeURIComponent(params.restaurant_id);
   const [composition, availability] = await Promise.all([
-    deleverFetch(
-      `/menu/${encodeURIComponent(params.restaurant_id)}/composition`
-    ) as Promise<ApiComposition>,
-    deleverFetch(
-      `/menu/${encodeURIComponent(params.restaurant_id)}/availability`
-    ) as Promise<ApiAvailability>,
+    deleverFetch(`/menu/${restaurantId}/composition`, {
+      acceptType: "application/vnd.eats.menu.composition.v2+json",
+    }) as Promise<ApiComposition>,
+    deleverFetch(`/menu/${restaurantId}/availability`, {
+      acceptType: "application/vnd.eats.menu.availability.v2+json",
+    }) as Promise<ApiAvailability>,
   ]);
 
-  const stockMap = new Map<string, number>();
+  // Convention from Delever spec: an entry is unavailable when an availability
+  // record exists with `stock <= 0`; missing entries default to "in stock".
+  const itemStock = new Map<string, number>();
   for (const it of availability?.items || []) {
-    stockMap.set(it.id, it.stock);
+    itemStock.set(it.itemId, it.stock ?? 0);
   }
+  const modifierStock = new Map<string, number>();
+  for (const m of availability?.modifiers || []) {
+    modifierStock.set(m.modifierId, m.stock ?? 0);
+  }
+  const isItemAvailable = (id: string) =>
+    !itemStock.has(id) || (itemStock.get(id) ?? 0) > 0;
+  const isModifierAvailable = (id: string) =>
+    !modifierStock.has(id) || (modifierStock.get(id) ?? 0) > 0;
 
   const categoryMap = new Map<string, string>();
-  for (const c of composition.categories) {
+  for (const c of composition?.categories || []) {
     categoryMap.set(c.id, pickLang(c.name, lang));
   }
 
-  const items: MenuItem[] = composition.items.map((it) => ({
-    id: it.id,
-    category: categoryMap.get(it.categoryId) || "",
-    name: pickLang(it.name, lang),
-    description: pickLang(it.description, lang),
-    price: it.price,
-    weight_g: it.weight,
-    available: !stockMap.has(it.id) || (stockMap.get(it.id) ?? 0) > 0,
-    modifiers: (it.modifiers || []).map((m) => ({
-      id: m.id,
-      name: pickLang(m.name, lang),
-      min: m.min,
-      max: m.max,
-      options: m.options.map((o) => ({
-        id: o.id,
-        name: pickLang(o.name, lang),
-        price: o.price,
+  const items: MenuItem[] = (composition?.items || []).map((it) => {
+    const groups = it.modifierGroups || [];
+    return {
+      id: it.id,
+      category: it.categoryId ? categoryMap.get(it.categoryId) || "" : "",
+      name: pickLang(it.name, lang),
+      description: it.description || "",
+      price: it.price,
+      measure: it.measure ?? 0,
+      measure_unit: it.measureUnit || "",
+      available: isItemAvailable(it.id),
+      modifiers: groups.map((g) => ({
+        id: g.id,
+        name: pickLang(g.name, lang),
+        min: g.minSelectedModifiers,
+        max: g.maxSelectedModifiers,
+        options: (g.modifiers || [])
+          .filter((o) => isModifierAvailable(o.id))
+          .map((o) => ({
+            id: o.id,
+            name: pickLang(o.name, lang),
+            price: o.price ?? 0,
+            min_amount: o.minAmount,
+            max_amount: o.maxAmount,
+          })),
       })),
-    })),
-  }));
+    };
+  });
 
   return {
     restaurant_id: params.restaurant_id,
     language: lang,
-    last_change: composition.lastChange || new Date().toISOString(),
+    last_change: composition?.lastChange || new Date().toISOString(),
     items,
   };
 }
@@ -406,7 +535,8 @@ function formatMenu(
     name: pickLang(it.name, lang),
     description: pickLang(it.description, lang),
     price: it.price,
-    weight_g: it.weight,
+    measure: it.weight,
+    measure_unit: "г",
     available: !stockMap.has(it.id) || (stockMap.get(it.id) ?? 0) > 0,
     modifiers: it.modifiers.map((m) => ({
       id: m.id,
@@ -468,40 +598,92 @@ export async function createOrder(
     return { order_id, total, status: "ACCEPTED" };
   }
 
+  // Delever V2 requires `price` and `name` per item (and per modifier) in
+  // the order body — those aren't in our MCP input, so we resolve them by
+  // fetching the menu first. This also serves as a sanity check (item exists,
+  // modifier belongs to the right group, etc.).
+  const menu = await getMenu({
+    restaurant_id: input.restaurant_id,
+    language: "ru",
+  });
+  const itemsById = new Map(menu.items.map((it) => [it.id, it]));
+
+  const orderItems = input.items.map((line) => {
+    const dish = itemsById.get(line.item_id);
+    if (!dish) {
+      throw new Error(
+        `Item ${line.item_id} is not on the menu of ${input.restaurant_id}.`
+      );
+    }
+    const modifierLookup = new Map<string, { name: string; price: number }>();
+    for (const g of dish.modifiers) {
+      for (const o of g.options) {
+        modifierLookup.set(o.id, { name: o.name, price: o.price });
+      }
+    }
+    const modifications = (line.modifier_ids || []).map((id) => {
+      const m = modifierLookup.get(id);
+      if (!m) {
+        throw new Error(
+          `Modifier ${id} is not available for ${line.item_id} (${dish.name}).`
+        );
+      }
+      return { id, name: m.name, quantity: 1, price: m.price };
+    });
+    const modifiersTotal = modifications.reduce((s, m) => s + m.price, 0);
+    // Per spec: "price (со стоимостью модификаций)".
+    const linePrice = dish.price + modifiersTotal;
+    return {
+      id: dish.id,
+      name: dish.name,
+      quantity: line.quantity,
+      price: linePrice,
+      modifications,
+    };
+  });
+
+  const itemsCost = orderItems.reduce(
+    (s, it) => s + it.price * it.quantity,
+    0
+  );
+
   const body = {
-    restaurantId: input.restaurant_id,
     discriminator: "aggregator",
     eatsId: `mcp_${Date.now()}`,
-    payment: input.payment,
-    comment: input.comment || "",
-    delivery: {
-      name: input.delivery.name,
-      phone: input.delivery.phone,
-      address: input.delivery.address,
-      location: { lat: input.delivery.lat, long: input.delivery.lng },
+    restaurantId: input.restaurant_id,
+    deliveryInfo: {
+      clientName: input.delivery.name,
+      phoneNumber: input.delivery.phone,
+      deliveryAddress: {
+        full: input.delivery.address,
+        // Spec types lat/long as strings.
+        latitude: String(input.delivery.lat),
+        longitude: String(input.delivery.lng),
+      },
     },
-    items: input.items.map((it) => ({
-      id: it.item_id,
-      quantity: it.quantity,
-      modifiers: (it.modifier_ids || []).map((id) => ({ id })),
-    })),
+    paymentInfo: {
+      itemsCost,
+      paymentType: input.payment,
+    },
+    items: orderItems,
+    ...(input.comment ? { comment: input.comment } : {}),
   };
 
   const result = (await deleverFetch("/order", {
     method: "POST",
+    headers: {
+      "Content-Type": "application/vnd.eats.order.v2+json",
+    },
     body: JSON.stringify(body),
-  })) as { id?: string; orderId?: string; total?: number; status?: OrderStatus };
+  })) as { result?: string; orderId?: string };
 
-  const order_id = result.orderId || result.id;
-  if (!order_id) {
-    throw new Error(
-      `Delever did not return an order id: ${JSON.stringify(result)}`
-    );
-  }
+  // Per spec only `result` is required; `orderId` is optional. Fall back to
+  // our outgoing `eatsId` so callers always have a stable identifier they
+  // can use to query order status via Delever's `eatsId`-aware endpoints.
   return {
-    order_id,
-    total: result.total ?? 0,
-    status: result.status ?? "ACCEPTED",
+    order_id: result.orderId || body.eatsId,
+    total: itemsCost,
+    status: "ACCEPTED",
   };
 }
 
@@ -522,14 +704,17 @@ export async function getOrderStatus(
     };
   }
 
+  // Spec: GET /v1/custom-integration/order/{orderId}/status
+  // → GetOrderByStatus = { status, comment?, updatedAt? }
   const result = (await deleverFetch(
     `/order/${encodeURIComponent(order_id)}/status`
-  )) as { status?: OrderStatus; updatedAt?: string };
+  )) as { status?: string; comment?: string; updatedAt?: string };
 
   return {
     order_id,
-    status: result.status ?? "ACCEPTED",
+    status: (result.status as OrderStatus) ?? "ACCEPTED",
     updated_at: result.updatedAt || new Date().toISOString(),
+    ...(result.comment ? { comment: result.comment } : {}),
   };
 }
 
@@ -549,9 +734,10 @@ export async function cancelOrder(
     return { order_id, status: "CANCELLED" };
   }
 
+  // Spec: DELETE /v1/custom-integration/order/{orderId}, body: { comment? }
   await deleverFetch(`/order/${encodeURIComponent(order_id)}`, {
     method: "DELETE",
-    body: JSON.stringify({ reason }),
+    body: JSON.stringify({ comment: reason }),
   });
   return { order_id, status: "CANCELLED" };
 }
