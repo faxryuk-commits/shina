@@ -279,6 +279,47 @@ Backed by `GET /order/{orderId}/status`.
 
 Backed by `DELETE /order/{orderId}`.
 
+### `get_order`
+
+Fetch the full order — items, delivery details, payment info and totals.
+Heavier than `get_order_status`; use it only when you need the body.
+
+```json
+{ "order_id": "ord_xxx" }
+```
+
+Backed by `GET /order/{orderId}` (response in `application/vnd.eats.order.v2+json`).
+
+### `update_order_status`
+
+Push a status update for an existing order. Useful for integrating courier or
+POS state-machine signals. Prefer `cancel_order` for user-initiated
+cancellations.
+
+```json
+{
+  "order_id": "ord_xxx",
+  "status": "TAKEN_BY_COURIER",
+  "comment": "Courier picked up at 19:42"
+}
+```
+
+Allowed statuses: `DELIVERED`, `TAKEN_BY_COURIER`, `CANCELLED`.
+
+Backed by `PUT /order/{orderId}/status` (returns 204 No Content).
+
+### `list_promo_items`
+
+Return menu items currently participating in promotional campaigns.
+
+```json
+{ "restaurant_id": "rst_001" }
+```
+
+Returns `{ "restaurant_id": "rst_001", "items": [{ "id": "...", "promo_id": "..." }] }`.
+
+Backed by `GET /menu/{restaurantId}/promos`.
+
 ## Known issues
 
 ### `inputSchema as any` casts in the MCP route
@@ -301,15 +342,14 @@ real (`USE_MOCKS=false`) mode, Delever owns the persistence.
 
 ## TODO / next iterations
 
-- OpenAPI spec + Custom GPT for ChatGPT (mirrors the same five tools)
+- OpenAPI spec + Custom GPT for ChatGPT (mirrors the same eight tools)
 - OAuth or shared-secret auth on the MCP endpoint itself (currently public)
 - Telegram mini-app frontend that uses the same Delever client
-- Persist Delever OAuth token across cold starts (KV / Upstash) — currently
-  re-issued per cold lambda
+- Persist Delever OAuth token + monitor ring buffer across cold starts
+  (Upstash Redis or Vercel KV) — both are in-process today
 - Push of order status updates to the user (polling on the client side for now)
-- Verify exact Delever auth payload shape against their staging environment
-  (current implementation uses RFC 6749 client_credentials with HTTP Basic
-  auth)
+- `update_order` (PUT `/order/{orderId}`) is not yet exposed — add when
+  Delever clarifies the practical use case (e.g. add items mid-flight)
 
 ## License
 

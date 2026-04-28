@@ -741,3 +741,177 @@ export async function cancelOrder(
   });
   return { order_id, status: "CANCELLED" };
 }
+
+/* ---------------------------------------------------------------------- */
+/* Extended order operations                                              */
+/* ---------------------------------------------------------------------- */
+
+export interface OrderItemDetails {
+  id: string;
+  name?: string;
+  quantity: number;
+  price: number;
+}
+
+export interface OrderDetails {
+  order_id: string;
+  platform?: string;
+  delivery_type?: string;
+  eats_id?: string;
+  restaurant_id: string;
+  client_name?: string;
+  phone?: string;
+  delivery_address?: string;
+  payment_type?: string;
+  items_cost?: number;
+  delivery_fee?: number;
+  persons?: number;
+  comment?: string;
+  items: OrderItemDetails[];
+}
+
+/** Spec: GET /v1/custom-integration/order/{orderId} */
+export async function getOrder(order_id: string): Promise<OrderDetails> {
+  if (isMockMode()) {
+    const record = mockOrders.get(order_id);
+    if (!record) {
+      throw new Error(
+        `Order ${order_id} not found. (Mock storage is reset on cold start.)`
+      );
+    }
+    return {
+      order_id: record.order_id,
+      restaurant_id: record.restaurant_id,
+      client_name: record.delivery.name,
+      phone: record.delivery.phone,
+      delivery_address: record.delivery.address,
+      payment_type: record.payment,
+      items_cost: record.total,
+      comment: record.comment,
+      items: record.items.map((line) => ({
+        id: line.item_id,
+        quantity: line.quantity,
+        price: 0, // mock store doesn't keep per-line resolved price
+      })),
+    };
+  }
+
+  type ApiOrderItem = {
+    id?: string;
+    name?: string;
+    quantity?: number;
+    price?: number;
+  };
+  type ApiOrderResponse = {
+    platform?: string;
+    discriminator?: string;
+    eatsId?: string;
+    restaurantId?: string;
+    deliveryInfo?: {
+      clientName?: string;
+      phoneNumber?: string;
+      deliveryAddress?: { full?: string };
+    };
+    paymentInfo?: {
+      itemsCost?: number;
+      paymentType?: string;
+      deliveryFee?: number;
+    };
+    persons?: number;
+    comment?: string;
+    items?: ApiOrderItem[];
+  };
+
+  // Spec: response is application/vnd.eats.order.v2+json (note the v2 vendor
+  // type — same family as createOrder).
+  const result = (await deleverFetch(
+    `/order/${encodeURIComponent(order_id)}`,
+    { acceptType: "application/vnd.eats.order.v2+json" }
+  )) as ApiOrderResponse;
+
+  return {
+    order_id,
+    platform: result.platform,
+    delivery_type: result.discriminator,
+    eats_id: result.eatsId,
+    restaurant_id: result.restaurantId || "",
+    client_name: result.deliveryInfo?.clientName,
+    phone: result.deliveryInfo?.phoneNumber,
+    delivery_address: result.deliveryInfo?.deliveryAddress?.full,
+    payment_type: result.paymentInfo?.paymentType,
+    items_cost: result.paymentInfo?.itemsCost,
+    delivery_fee: result.paymentInfo?.deliveryFee,
+    persons: result.persons,
+    comment: result.comment,
+    items: (result.items || []).map((it) => ({
+      id: it.id || "",
+      name: it.name,
+      quantity: it.quantity ?? 0,
+      price: it.price ?? 0,
+    })),
+  };
+}
+
+export type UpdateOrderStatus =
+  | "DELIVERED"
+  | "CANCELLED"
+  | "TAKEN_BY_COURIER";
+
+/** Spec: PUT /v1/custom-integration/order/{orderId}/status */
+export async function updateOrderStatus(
+  order_id: string,
+  status: UpdateOrderStatus,
+  comment?: string
+): Promise<{ order_id: string; status: UpdateOrderStatus }> {
+  if (isMockMode()) {
+    const record = mockOrders.get(order_id);
+    if (!record) {
+      throw new Error(
+        `Order ${order_id} not found. (Mock storage is reset on cold start.)`
+      );
+    }
+    record.status = status as OrderStatus;
+    record.updated_at = new Date().toISOString();
+    return { order_id, status };
+  }
+
+  await deleverFetch(`/order/${encodeURIComponent(order_id)}/status`, {
+    method: "PUT",
+    body: JSON.stringify(comment ? { status, comment } : { status }),
+  });
+  return { order_id, status };
+}
+
+export interface PromoItem {
+  /** Menu item id (system id of the dish). */
+  id: string;
+  /** Promo id this item participates in. */
+  promo_id: string;
+}
+
+/** Spec: GET /v1/custom-integration/menu/{restaurantId}/promos */
+export async function listPromoItems(restaurant_id: string): Promise<{
+  restaurant_id: string;
+  items: PromoItem[];
+}> {
+  if (isMockMode()) {
+    // Mocks don't model promotions yet — return an empty list with a note
+    // so the LLM can still call the tool without error.
+    return { restaurant_id, items: [] };
+  }
+
+  type ApiPromos = {
+    promoItems?: { id: string; promoId: string }[];
+  };
+  const result = (await deleverFetch(
+    `/menu/${encodeURIComponent(restaurant_id)}/promos`
+  )) as ApiPromos;
+
+  return {
+    restaurant_id,
+    items: (result.promoItems || []).map((p) => ({
+      id: p.id,
+      promo_id: p.promoId,
+    })),
+  };
+}

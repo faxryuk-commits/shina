@@ -6,8 +6,11 @@
  *   - search_restaurants
  *   - get_menu
  *   - create_order
+ *   - get_order
  *   - get_order_status
+ *   - update_order_status
  *   - cancel_order
+ *   - list_promo_items
  *
  * Note on `inputSchema as any` casts below: this is the documented
  * workaround for upstream issue
@@ -26,10 +29,14 @@ import {
   cancelOrder,
   createOrder,
   getMenu,
+  getOrder,
   getOrderStatus,
+  listPromoItems,
   searchRestaurants,
+  updateOrderStatus,
   type LangCode,
   type PaymentType,
+  type UpdateOrderStatus,
 } from "@/lib/deleverClient";
 import { logEvent } from "@/lib/eventLog";
 
@@ -99,6 +106,26 @@ interface CancelOrderArgs {
   order_id: string;
   reason: string;
 }
+
+interface GetOrderArgs {
+  order_id: string;
+}
+
+interface UpdateOrderStatusArgs {
+  order_id: string;
+  status: UpdateOrderStatus;
+  comment?: string;
+}
+
+interface ListPromoItemsArgs {
+  restaurant_id: string;
+}
+
+const updateOrderStatusEnum = z.enum([
+  "DELIVERED",
+  "CANCELLED",
+  "TAKEN_BY_COURIER",
+]);
 
 function asJsonResult(value: unknown): CallToolResult {
   return {
@@ -282,6 +309,76 @@ const handler = createMcpHandler(
       },
       tracedTool<CancelOrderArgs>("cancel_order", (args) =>
         cancelOrder(args.order_id, args.reason)
+      )
+    );
+
+    server.registerTool(
+      "get_order",
+      {
+        title: "Get full order details",
+        description:
+          "Fetch a previously created order with all of its items, delivery " +
+          "details, payment info and totals. Prefer get_order_status when " +
+          "you only need the current state — get_order is heavier.",
+        inputSchema: {
+          order_id: z
+            .string()
+            .min(1)
+            .describe("Order id returned by create_order."),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+      },
+      tracedTool<GetOrderArgs>("get_order", (args) => getOrder(args.order_id))
+    );
+
+    server.registerTool(
+      "update_order_status",
+      {
+        title: "Update order status",
+        description:
+          "Push a status update for an existing order. Allowed values are " +
+          "DELIVERED, TAKEN_BY_COURIER and CANCELLED. Prefer cancel_order for " +
+          "user-initiated cancellations (it provides a clearer mental model " +
+          "and a richer reason field); use this tool when integrating courier " +
+          "or POS state-machine signals.",
+        inputSchema: {
+          order_id: z
+            .string()
+            .min(1)
+            .describe("Order id returned by create_order."),
+          status: updateOrderStatusEnum.describe(
+            "New status: DELIVERED, TAKEN_BY_COURIER, or CANCELLED."
+          ),
+          comment: z
+            .string()
+            .optional()
+            .describe("Optional human-readable note attached to the update."),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+      },
+      tracedTool<UpdateOrderStatusArgs>("update_order_status", (args) =>
+        updateOrderStatus(args.order_id, args.status, args.comment)
+      )
+    );
+
+    server.registerTool(
+      "list_promo_items",
+      {
+        title: "List promo items in a menu",
+        description:
+          "Fetch the list of menu items participating in promotional " +
+          "campaigns for a restaurant. Returns pairs of (item_id, promo_id). " +
+          "Use this to surface discounts to the user before placing an order.",
+        inputSchema: {
+          restaurant_id: z
+            .string()
+            .min(1)
+            .describe("Restaurant id from search_restaurants output."),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+      },
+      tracedTool<ListPromoItemsArgs>("list_promo_items", (args) =>
+        listPromoItems(args.restaurant_id)
       )
     );
   },
