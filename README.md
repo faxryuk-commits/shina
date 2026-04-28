@@ -135,26 +135,24 @@ request. Your client (Claude) handles this transparently.
 The Delever public docs at
 <https://delever.gitbook.io/delever/for-developers/dlya-integratorov-v2>
 specify endpoints as **relative paths** with `servers: [{ "url": "/" }]` —
-the docs do not embed a hostname. The integrator-facing production host is
-`https://integrator.api.delever.uz`.
+they don't publish a hostname. The actual production gateway (verified
+empirically) is **`https://integrator.api.delever.uz`**.
 
-In Vercel → *Settings* → *Environment Variables*:
+In Vercel → *Settings* → *Environment Variables* set:
 
 | Name | Value |
 | --- | --- |
 | `USE_MOCKS` | `false` |
 | `DELEVER_BASE_URL` | `https://integrator.api.delever.uz` |
-| `DELEVER_CLIENT_ID` | UUID provided by Delever |
-| `DELEVER_CLIENT_SECRET` | base64(`username:password`) per the OpenAPI spec |
+| `DELEVER_CLIENT_ID` | UUID issued by Delever |
+| `DELEVER_CLIENT_SECRET` | base64-encoded `<username>:<password>` |
 
-> Heads-up on credential labels: Delever support sometimes communicates the
-> two values with `client_id` / `client_secret` labels swapped. The OpenAPI
-> spec is authoritative — `client_secret` is the base64-encoded value, and
-> `client_id` is the UUID. Verified empirically against
-> `integrator.api.delever.uz` (the swapped mapping returns
-> `401 invalid client secret`).
+A note on the credentials mapping: in the chat Delever sometimes labels the
+two values the other way round. Empirically the OAuth endpoint accepts the
+spec-aligned mapping above (UUID → `client_id`, base64 → `client_secret`)
+and rejects the swapped form with `401 invalid client secret`.
 
-Optionally `DELEVER_OAUTH_PATH` if their token endpoint differs from
+Optionally `DELEVER_OAUTH_PATH` if their token endpoint ever moves off
 `/v1/custom-integration/security/oauth/token`.
 
 Redeploy. No code changes required.
