@@ -264,22 +264,33 @@ export default async function Home() {
 
       <section style={{ marginTop: 40 }}>
         <SectionTitle>Tools exposed</SectionTitle>
-        <ul style={{ margin: 0, paddingLeft: 20, opacity: 0.85 }}>
-          <li>
-            <code style={inlineCodeStyle}>search_restaurants</code>
-          </li>
-          <li>
-            <code style={inlineCodeStyle}>get_menu</code>
-          </li>
-          <li>
-            <code style={inlineCodeStyle}>create_order</code>
-          </li>
-          <li>
-            <code style={inlineCodeStyle}>get_order_status</code>
-          </li>
-          <li>
-            <code style={inlineCodeStyle}>cancel_order</code>
-          </li>
+        <ul
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+            gap: 6,
+            margin: 0,
+            padding: 0,
+            listStyle: "none",
+            opacity: 0.85,
+          }}
+        >
+          {EXPOSED_TOOLS.map((t) => (
+            <li
+              key={t.name}
+              style={{
+                display: "flex",
+                alignItems: "baseline",
+                gap: 8,
+                padding: "6px 0",
+                borderBottom: "1px dashed #1f1f1f",
+                fontSize: 13,
+              }}
+            >
+              <code style={inlineCodeStyle}>{t.name}</code>
+              <span style={{ opacity: 0.55, fontSize: 12 }}>{t.desc}</span>
+            </li>
+          ))}
         </ul>
       </section>
     </main>
@@ -556,3 +567,14 @@ const inlineCodeStyle: React.CSSProperties = {
   fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
   fontSize: 12,
 };
+
+const EXPOSED_TOOLS: { name: string; desc: string }[] = [
+  { name: "search_restaurants", desc: "list branches + online status" },
+  { name: "get_menu", desc: "categories, items, modifiers, stop list" },
+  { name: "create_order", desc: "place a new order on the POS" },
+  { name: "get_order", desc: "full order details (items, payment, address)" },
+  { name: "get_order_status", desc: "ACCEPTED → COOKING → … → DELIVERED" },
+  { name: "update_order_status", desc: "DELIVERED / TAKEN_BY_COURIER / CANCELLED" },
+  { name: "cancel_order", desc: "cancel a placed order with a reason" },
+  { name: "list_promo_items", desc: "menu items participating in promos" },
+];
