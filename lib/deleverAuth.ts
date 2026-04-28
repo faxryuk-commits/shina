@@ -23,9 +23,15 @@ let cached: CachedToken | null = null;
 function readEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
+    const hint =
+      name === "DELEVER_BASE_URL"
+        ? " Note: Delever's public OpenAPI spec uses `servers: [{url:'/'}]` " +
+          "and does NOT name a hostname. Ask Delever support which absolute " +
+          "URL to use for your integrator account, or keep USE_MOCKS=true."
+        : "";
     throw new Error(
       `Environment variable ${name} is required when USE_MOCKS=false. ` +
-        `Set it in Vercel → Settings → Environment Variables.`
+        `Set it in Vercel → Settings → Environment Variables.${hint}`
     );
   }
   return value;

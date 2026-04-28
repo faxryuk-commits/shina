@@ -132,18 +132,24 @@ request. Your client (Claude) handles this transparently.
 
 ## Switching to the real Delever API
 
-Once you receive `client_id` and `client_secret` from Delever, in the Vercel
-project settings add:
+The Delever public docs at
+<https://delever.gitbook.io/delever/for-developers/dlya-integratorov-v2>
+specify endpoints as **relative paths** with `servers: [{ "url": "/" }]` —
+i.e. they do **not** publish a production hostname. You must ask Delever
+support for the absolute base URL that applies to your integrator account.
+
+Once you have the hostname, plus `client_id` and `client_secret`, set in
+Vercel → *Settings* → *Environment Variables*:
 
 | Name | Value |
 | --- | --- |
 | `USE_MOCKS` | `false` |
-| `DELEVER_BASE_URL` | `https://api.delever.io` (or whatever they tell you) |
+| `DELEVER_BASE_URL` | (hostname Delever gave you, e.g. `https://api.<their-domain>`) |
 | `DELEVER_CLIENT_ID` | (from Delever) |
 | `DELEVER_CLIENT_SECRET` | (from Delever) |
 
 Optionally `DELEVER_OAUTH_PATH` if their token endpoint differs from
-`/security/oauth/token`.
+`/v1/custom-integration/security/oauth/token`.
 
 Redeploy. No code changes required.
 
