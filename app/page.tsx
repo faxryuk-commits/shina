@@ -90,6 +90,8 @@ export default async function Home() {
   const mode = useMocks ? "MOCKS" : "LIVE";
   const modeColor = useMocks ? "#f59e0b" : "#10b981";
   const onlineCount = restaurants?.restaurants.filter((r) => r.online).length ?? 0;
+  const withoutDetailsCount =
+    restaurants?.restaurants.filter((r) => !r.details_available).length ?? 0;
 
   return (
     <main
@@ -215,8 +217,10 @@ export default async function Home() {
           restaurants.ok ? (
             <>
               <p style={{ opacity: 0.6, marginTop: 0, fontSize: 13 }}>
-                {restaurants.restaurants.length} total · {onlineCount} online ·{" "}
-                fetched in {restaurants.latencyMs} ms
+                {restaurants.restaurants.length} total · {onlineCount} online
+                {withoutDetailsCount > 0 &&
+                  ` · ${withoutDetailsCount} without details (Delever cap)`}{" "}
+                · fetched in {restaurants.latencyMs} ms
               </p>
               {restaurants.restaurants.length === 0 ? (
                 <EmptyState text="No restaurants returned by the API." />
@@ -481,11 +485,12 @@ function EmptyState({ text }: { text: string }) {
 
 function RestaurantCard({ r }: { r: RestaurantSummary }) {
   const dotColor = r.online ? "#10b981" : "#525252";
+  const hasDetails = r.details_available;
   return (
     <div
       style={{
-        border: "1px solid #1f1f1f",
-        background: "#111",
+        border: `1px solid ${hasDetails ? "#1f1f1f" : "#3a2d12"}`,
+        background: hasDetails ? "#111" : "#161208",
         borderRadius: 12,
         padding: 14,
       }}
@@ -505,9 +510,10 @@ function RestaurantCard({ r }: { r: RestaurantSummary }) {
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
+            color: hasDetails ? "#ededed" : "#d4af37",
           }}
         >
-          {r.name || r.id}
+          {hasDetails ? r.name : `Branch ${r.id.slice(0, 8)}…`}
         </strong>
         <span
           title={r.online ? "online" : "offline"}
@@ -534,7 +540,9 @@ function RestaurantCard({ r }: { r: RestaurantSummary }) {
         </span>
       </div>
       <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
-        {r.address || "—"}
+        {hasDetails
+          ? r.address || "—"
+          : "Details unavailable via API V2 — Delever's GET /restaurants caps at 10. Menu / order endpoints still work for this branch."}
       </div>
       <div
         style={{
@@ -543,7 +551,8 @@ function RestaurantCard({ r }: { r: RestaurantSummary }) {
           fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
         }}
       >
-        {r.id} · {r.lat.toFixed(4)}, {r.lng.toFixed(4)}
+        {r.id}
+        {hasDetails && ` · ${r.lat.toFixed(4)}, ${r.lng.toFixed(4)}`}
       </div>
     </div>
   );

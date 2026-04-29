@@ -340,6 +340,27 @@ Mock mode keeps placed orders in a `Map` inside the lambda's memory. Once the
 lambda goes cold, mock orders disappear. This is intentional for the MVP — in
 real (`USE_MOCKS=false`) mode, Delever owns the persistence.
 
+### Delever caps `GET /restaurants` at 10 entries
+
+Empirically (verified 2026-04-29 against `integrator.api.delever.uz`), the
+public V2 endpoint `GET /v1/custom-integration/restaurants` returns at most
+10 places, and **none** of `?limit=`, `?offset=`, `?page=`, `?page_size=` or
+`?cursor=` change the response. The companion endpoint
+`GET /v1/custom-integration/restaurants/availability` returns the **full**
+list of branches (id + enabled), and the menu / order endpoints work for
+every branch — only branch _details_ (title, address, coordinates) are gated.
+
+`searchRestaurants` works around this by treating `availability` as the
+authoritative branch list and merging in `/restaurants` details when present.
+Branches outside the first 10 are returned with `details_available: false`,
+empty `name`/`address` and zeroed coordinates. The home page renders such
+cards with a yellow tint and the explanation "Details unavailable via API V2
+— Delever's GET /restaurants caps at 10."
+
+If your account has more than 10 branches, ask Delever support to lift this
+server-side cap (referencing the OpenAPI spec, which does not document any
+limit).
+
 ## TODO / next iterations
 
 - OpenAPI spec + Custom GPT for ChatGPT (mirrors the same eight tools)

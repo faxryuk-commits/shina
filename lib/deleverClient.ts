@@ -31,6 +31,13 @@ export interface RestaurantSummary {
   lat: number;
   lng: number;
   online: boolean;
+  /**
+   * False when only the id + online flag is known because Delever's
+   * `GET /restaurants` capped at 10 entries and this branch wasn't in
+   * that subset (the rest of the data lives only behind the menu/order
+   * endpoints, which work fine for all branches).
+   */
+  details_available: boolean;
 }
 
 export interface MenuModifierOption {
@@ -308,6 +315,13 @@ export async function searchRestaurants(
 
   // Spec: GET /v1/custom-integration/restaurants → { places: GetRestaurantModel[] }
   // Spec: GET /v1/custom-integration/restaurants/availability → { places: Place[] }
+  //
+  // Quirk (verified empirically against integrator.api.delever.uz on
+  // 2026-04-29): `/restaurants` returns at most 10 entries — no documented
+  // pagination parameter (limit / offset / page / cursor) changes the
+  // result. `/restaurants/availability` returns the full set with id +
+  // enabled. We treat `availability` as the authoritative list of branches
+  // and join in details from `/restaurants` when available.
   type ApiRestaurant = {
     id: string;
     title?: string;
@@ -326,20 +340,47 @@ export async function searchRestaurants(
     deleverFetch("/restaurants/availability") as Promise<ApiAvailabilityList>,
   ]);
 
-  const availability = new Map(
-    (availabilityRaw?.places || []).map((a) => [a.id, a.enabled])
-  );
+  const detailsById = new Map<string, ApiRestaurant>();
+  for (const r of restaurantsRaw?.places || []) {
+    detailsById.set(r.id, r);
+  }
 
-  const summaries = (restaurantsRaw?.places || []).map<RestaurantSummary>(
-    (r) => ({
-      id: r.id,
-      name: r.title || r.id,
-      address: r.address || "",
-      lat: r.location?.lat ?? 0,
-      lng: r.location?.long ?? 0,
-      online: availability.get(r.id) ?? false,
-    })
-  );
+  const availabilityList = availabilityRaw?.places || [];
+
+  // Authoritative list = `availability`; details merged in when known.
+  // Falls back to `/restaurants` order if `availability` is empty (mocks
+  // and edge cases).
+  const baseList: { id: string; online: boolean }[] =
+    availabilityList.length > 0
+      ? availabilityList.map((a) => ({ id: a.id, online: a.enabled }))
+      : (restaurantsRaw?.places || []).map((r) => ({
+          id: r.id,
+          online: false,
+        }));
+
+  const summaries = baseList.map<RestaurantSummary>(({ id, online }) => {
+    const details = detailsById.get(id);
+    if (details) {
+      return {
+        id,
+        name: details.title || id,
+        address: details.address || "",
+        lat: details.location?.lat ?? 0,
+        lng: details.location?.long ?? 0,
+        online,
+        details_available: true,
+      };
+    }
+    return {
+      id,
+      name: id,
+      address: "",
+      lat: 0,
+      lng: 0,
+      online,
+      details_available: false,
+    };
+  });
 
   return filterRestaurants(summaries, params);
 }
@@ -356,6 +397,7 @@ function toSummary(
     lat: r.location.lat,
     lng: r.location.long,
     online,
+    details_available: true,
   };
 }
 
