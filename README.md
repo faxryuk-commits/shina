@@ -340,26 +340,35 @@ Mock mode keeps placed orders in a `Map` inside the lambda's memory. Once the
 lambda goes cold, mock orders disappear. This is intentional for the MVP — in
 real (`USE_MOCKS=false`) mode, Delever owns the persistence.
 
-### Delever caps `GET /restaurants` at 10 entries
+### `GET /restaurants` had a server-side cap at 10 entries (lifted 2026-04-29)
 
-Empirically (verified 2026-04-29 against `integrator.api.delever.uz`), the
-public V2 endpoint `GET /v1/custom-integration/restaurants` returns at most
-10 places, and **none** of `?limit=`, `?offset=`, `?page=`, `?page_size=` or
-`?cursor=` change the response. The companion endpoint
-`GET /v1/custom-integration/restaurants/availability` returns the **full**
-list of branches (id + enabled), and the menu / order endpoints work for
-every branch — only branch _details_ (title, address, coordinates) are gated.
+Earlier on 2026-04-29 the public V2 endpoint `GET /v1/custom-integration/restaurants`
+returned at most 10 places against `integrator.api.delever.uz` for our
+account, and **none** of `?limit=`, `?offset=`, `?page=`, `?page_size=` or
+`?cursor=` changed the response. The companion endpoint
+`GET /v1/custom-integration/restaurants/availability` returned the **full**
+list of branches (id + enabled). Later that same day the cap was lifted for
+our integrator and `/restaurants` started returning all linked branches with
+full details (title, address, location).
 
-`searchRestaurants` works around this by treating `availability` as the
-authoritative branch list and merging in `/restaurants` details when present.
-Branches outside the first 10 are returned with `details_available: false`,
-empty `name`/`address` and zeroed coordinates. The home page renders such
-cards with a yellow tint and the explanation "Details unavailable via API V2
-— Delever's GET /restaurants caps at 10."
+The fallback logic stays in place because the cap is server-side
+configuration and could reappear: `searchRestaurants` treats
+`/availability` as the authoritative branch list and merges in
+`/restaurants` details when present. Branches missing details get
+`details_available: false`, empty `name`/`address` and zeroed coordinates;
+the home page card surfaces them with a yellow tint and a
+"Имя/адрес не отдаются API V2" hint, while menu and order endpoints keep
+working normally for them.
 
-If your account has more than 10 branches, ask Delever support to lift this
-server-side cap (referencing the OpenAPI spec, which does not document any
-limit).
+### Restaurant-level menu stats on the home page
+
+`searchRestaurants({ with_menu_stats: true })` fans out one
+`/menu/{id}/composition` + `/menu/{id}/availability` per branch in
+parallel (`Promise.allSettled`-style with a 6 s per-request timeout), so
+each card on the home page shows live "N кат · M тов · K стоп" chips and
+falls back to "Меню пустое" / "Меню недоступно" / "—" when appropriate.
+Use `getMenuStats(restaurantId, lang)` directly when only the counts are
+needed (skips modifier expansion).
 
 ## TODO / next iterations
 
