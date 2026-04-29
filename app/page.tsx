@@ -59,7 +59,11 @@ async function probeAuth(useMocks: boolean): Promise<AuthProbe> {
 async function probeRestaurants(): Promise<RestaurantsProbe> {
   const start = Date.now();
   try {
-    const restaurants = await searchRestaurants({ language: "ru" });
+    const restaurants = await searchRestaurants({
+      language: "ru",
+      with_menu_stats: true,
+      menu_stats_timeout_ms: 6000,
+    });
     return { ok: true, latencyMs: Date.now() - start, restaurants };
   } catch (err) {
     return {
@@ -365,6 +369,17 @@ function StatusRow({
 function RestaurantCard({ r }: { r: RestaurantSummary }) {
   const dotColor = r.online ? "#10b981" : "#525252";
   const hasDetails = r.details_available;
+  const stats = r.menu_stats;
+  const hasMenu = !!stats && stats.items_count > 0;
+
+  // For branches without details, surface the first few category names as a
+  // "fingerprint" so the user can recognise the branch even though Delever
+  // refuses to expose its title via the API.
+  const fingerprint =
+    !hasDetails && stats && stats.category_names.length > 0
+      ? stats.category_names.slice(0, 3).join(" · ")
+      : "";
+
   return (
     <Link
       href={`/restaurants/${r.id}`}
@@ -397,7 +412,11 @@ function RestaurantCard({ r }: { r: RestaurantSummary }) {
             color: hasDetails ? "#ededed" : "#d4af37",
           }}
         >
-          {hasDetails ? r.name : `Branch ${r.id.slice(0, 8)}…`}
+          {hasDetails
+            ? r.name
+            : fingerprint
+              ? fingerprint
+              : `Branch ${r.id.slice(0, 8)}…`}
         </strong>
         <span
           title={r.online ? "online" : "offline"}
@@ -409,6 +428,7 @@ function RestaurantCard({ r }: { r: RestaurantSummary }) {
             fontSize: 11,
             fontWeight: 600,
             letterSpacing: 0.4,
+            flexShrink: 0,
           }}
         >
           <span
@@ -426,10 +446,14 @@ function RestaurantCard({ r }: { r: RestaurantSummary }) {
       <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
         {hasDetails
           ? r.address || "—"
-          : "Details unavailable via API V2 — Delever's GET /restaurants caps at 10. Menu / order endpoints still work for this branch."}
+          : "Имя/адрес не отдаются API V2 (cap of 10 в /restaurants). Меню/заказы доступны."}
       </div>
+
+      <MenuStatsRow stats={stats} hasMenu={hasMenu} />
+
       <div
         style={{
+          marginTop: 8,
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
@@ -461,6 +485,103 @@ function RestaurantCard({ r }: { r: RestaurantSummary }) {
         </span>
       </div>
     </Link>
+  );
+}
+
+function MenuStatsRow({
+  stats,
+  hasMenu,
+}: {
+  stats: RestaurantSummary["menu_stats"];
+  hasMenu: boolean;
+}) {
+  if (!stats) {
+    return (
+      <div
+        style={{
+          fontSize: 11,
+          color: "#737373",
+          letterSpacing: 0.3,
+          marginBottom: 2,
+        }}
+      >
+        —
+      </div>
+    );
+  }
+  if (stats.error) {
+    return (
+      <div
+        style={{
+          fontSize: 11,
+          color: "#f59e0b",
+          letterSpacing: 0.3,
+          marginBottom: 2,
+        }}
+        title={stats.error}
+      >
+        Меню недоступно
+      </div>
+    );
+  }
+  if (!hasMenu) {
+    return (
+      <div
+        style={{
+          fontSize: 11,
+          color: "#737373",
+          letterSpacing: 0.3,
+          marginBottom: 2,
+        }}
+      >
+        Меню пустое
+      </div>
+    );
+  }
+  const stopColor = stats.unavailable_count > 0 ? "#ef4444" : "#737373";
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 6,
+        fontSize: 11,
+        marginBottom: 2,
+      }}
+    >
+      <StatChip label={`${stats.categories_count} кат.`} />
+      <StatChip label={`${stats.items_count} тов.`} />
+      <StatChip
+        label={
+          stats.unavailable_count > 0
+            ? `${stats.unavailable_count} стоп`
+            : "0 стоп"
+        }
+        color={stopColor}
+      />
+    </div>
+  );
+}
+
+function StatChip({ label, color }: { label: string; color?: string }) {
+  const c = color || "#737373";
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "1px 7px",
+        borderRadius: 999,
+        border: `1px solid ${c}55`,
+        background: `${c}1a`,
+        color: c,
+        fontSize: 11,
+        fontVariantNumeric: "tabular-nums",
+        letterSpacing: 0.2,
+      }}
+    >
+      {label}
+    </span>
   );
 }
 

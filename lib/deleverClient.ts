@@ -24,6 +24,28 @@ import {
 
 export type { LangCode } from "./mockData";
 
+export interface MenuStats {
+  /** Number of categories the branch has in its menu. */
+  categories_count: number;
+  /** Number of items in the menu. */
+  items_count: number;
+  /** Items currently unavailable (on stop). */
+  unavailable_count: number;
+  /**
+   * First few category names (resolved in caller's language) — used as a
+   * "fingerprint" for branches whose `/restaurants` details are not exposed
+   * (Delever's 10-item cap), so the UI still shows _something_ recognisable.
+   */
+  category_names: string[];
+  /** Restaurant menu's `lastChange` ISO timestamp. */
+  last_change: string;
+  /**
+   * True if either the composition or availability call failed; counts may
+   * be partial. Surfaces as "—" in the UI.
+   */
+  error?: string;
+}
+
 export interface RestaurantSummary {
   id: string;
   name: string;
@@ -38,6 +60,11 @@ export interface RestaurantSummary {
    * endpoints, which work fine for all branches).
    */
   details_available: boolean;
+  /**
+   * Optional menu stats, populated when `with_menu_stats=true` is passed
+   * to `searchRestaurants`.
+   */
+  menu_stats?: MenuStats;
 }
 
 export interface MenuModifierOption {
@@ -336,6 +363,15 @@ export interface SearchRestaurantsParams {
   query?: string;
   only_available?: boolean;
   language?: LangCode;
+  /**
+   * When true, also fetches `/menu/{id}/composition` + `/availability` for
+   * each branch in parallel and attaches the resulting `menu_stats` to every
+   * `RestaurantSummary`. Adds latency proportional to the slowest menu fetch
+   * but bounded by `menu_stats_timeout_ms` (default 6000).
+   */
+  with_menu_stats?: boolean;
+  /** Per-branch menu fetch timeout in milliseconds. Default: 6000. */
+  menu_stats_timeout_ms?: number;
 }
 
 export async function searchRestaurants(
@@ -422,7 +458,133 @@ export async function searchRestaurants(
     };
   });
 
-  return filterRestaurants(summaries, params);
+  const filtered = filterRestaurants(summaries, params);
+
+  if (params.with_menu_stats) {
+    const timeoutMs = params.menu_stats_timeout_ms ?? 6000;
+    const statsPairs = await Promise.all(
+      filtered.map(async (r) => {
+        try {
+          const stats = await withTimeout(
+            getMenuStats(r.id, lang),
+            timeoutMs,
+            `menu stats for ${r.id}`
+          );
+          return [r.id, stats] as const;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return [
+            r.id,
+            {
+              categories_count: 0,
+              items_count: 0,
+              unavailable_count: 0,
+              category_names: [],
+              last_change: "",
+              error: message,
+            } satisfies MenuStats,
+          ] as const;
+        }
+      })
+    );
+    const statsById = new Map(statsPairs);
+    return filtered.map((r) => ({ ...r, menu_stats: statsById.get(r.id) }));
+  }
+
+  return filtered;
+}
+
+/**
+ * Lightweight menu summary — fetches both composition and availability and
+ * returns only the counts the UI needs. Cheaper than `getMenu` because it
+ * skips modifier expansion and string allocation per item.
+ */
+export async function getMenuStats(
+  restaurantId: string,
+  language: LangCode = "ru"
+): Promise<MenuStats> {
+  if (isMockMode()) {
+    const menu = MOCK_MENUS[restaurantId];
+    if (!menu) {
+      return {
+        categories_count: 0,
+        items_count: 0,
+        unavailable_count: 0,
+        category_names: [],
+        last_change: "",
+      };
+    }
+    const stockMap = buildStockMap(MOCK_AVAILABILITY[restaurantId]);
+    const unavailable = menu.items.filter(
+      (it) => stockMap.has(it.id) && (stockMap.get(it.id) ?? 0) <= 0
+    ).length;
+    return {
+      categories_count: menu.categories.length,
+      items_count: menu.items.length,
+      unavailable_count: unavailable,
+      category_names: menu.categories
+        .slice(0, 3)
+        .map((c) => pickLang(c.name, language)),
+      last_change: menu.lastChange,
+    };
+  }
+
+  type ApiCategoryLite = { id: string; name: Localized; sortOrder?: number };
+  type ApiItemLite = { id: string };
+  type ApiCompositionLite = {
+    categories?: ApiCategoryLite[];
+    items?: ApiItemLite[];
+    lastChange?: string;
+  };
+  type ApiAvailabilityLite = {
+    items?: { itemId: string; stock?: number }[];
+  };
+
+  const id = encodeURIComponent(restaurantId);
+  const [composition, availability] = await Promise.all([
+    deleverFetch(`/menu/${id}/composition`, {
+      acceptType: "application/vnd.eats.menu.composition.v2+json",
+    }) as Promise<ApiCompositionLite>,
+    deleverFetch(`/menu/${id}/availability`, {
+      acceptType: "application/vnd.eats.menu.availability.v2+json",
+    }) as Promise<ApiAvailabilityLite>,
+  ]);
+
+  const itemIds = new Set((composition?.items || []).map((i) => i.id));
+  let unavailable = 0;
+  for (const it of availability?.items || []) {
+    if (!itemIds.has(it.itemId)) continue;
+    if ((it.stock ?? 0) <= 0) unavailable += 1;
+  }
+
+  const categories = (composition?.categories || []).slice();
+  categories.sort(
+    (a, b) =>
+      (a.sortOrder ?? Number.MAX_SAFE_INTEGER) -
+      (b.sortOrder ?? Number.MAX_SAFE_INTEGER)
+  );
+
+  return {
+    categories_count: categories.length,
+    items_count: composition?.items?.length ?? 0,
+    unavailable_count: unavailable,
+    category_names: categories.slice(0, 3).map((c) => pickLang(c.name, language)),
+    last_change: composition?.lastChange || "",
+  };
+}
+
+function withTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+  label: string
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  }) as Promise<T>;
 }
 
 function toSummary(
