@@ -61,7 +61,14 @@ const orderItemSchema = z.object({
     .array(z.string())
     .optional()
     .describe(
-      "Selected modifier-option ids from item.modifiers[].options[].id. Respect each modifier group's `min`/`max` bounds. Omit (or pass []) when the user did not request any extras."
+      "Selected modifier-option ids from item.modifiers[].options[].id. " +
+        "REQUIRED FOR MANDATORY GROUPS: for every modifier group on the item " +
+        "where `min >= 1` you MUST include at least `min` (and at most `max`) " +
+        "option ids from THAT group — the kitchen will reject the order " +
+        "otherwise (e.g. a sauce group with min=1 means the customer must " +
+        "pick exactly one sauce). For optional groups (min=0) you can omit " +
+        "selections. If the user did not specify a choice for a mandatory " +
+        "group, ASK them which option they want before calling create_order."
     ),
 });
 
@@ -372,6 +379,10 @@ const handler = createMcpHandler(
           "  • You called search_restaurants and have a real restaurant_id.",
           "  • You called get_menu and every item_id / modifier_id you pass",
           "    came verbatim from that response, all items have available=true.",
+          "  • For every item, every modifier group with min >= 1 has at",
+          "    least `min` option ids selected (e.g. a sauce group with",
+          "    min=1, max=1 means pick exactly one). If the user did not",
+          "    specify a choice, ASK them — do not silently omit it.",
           "  • You confirmed with the user the full order: items, modifiers,",
           "    delivery address, phone, payment method and total cost in UZS.",
           "  • You have real lat/lng for the delivery address — never guess.",

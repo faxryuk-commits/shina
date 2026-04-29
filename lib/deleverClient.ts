@@ -955,21 +955,70 @@ export async function createOrder(
         `Item ${line.item_id} is not on the menu of ${input.restaurant_id}.`
       );
     }
-    const modifierLookup = new Map<string, { name: string; price: number }>();
+    if (!dish.available) {
+      throw new Error(
+        `Item ${line.item_id} (${dish.name}) is currently on stop.`
+      );
+    }
+
+    // Build a lookup that knows which group each option belongs to so we
+    // can validate the per-group min/max selection rules before the order
+    // is forwarded to Delever / iiko (which would otherwise reject it
+    // with an opaque "invalid group amount" error).
+    const optionToGroup = new Map<
+      string,
+      { groupId: string; groupName: string; price: number; name: string }
+    >();
     for (const g of dish.modifiers) {
       for (const o of g.options) {
-        modifierLookup.set(o.id, { name: o.name, price: o.price });
+        optionToGroup.set(o.id, {
+          groupId: g.id,
+          groupName: g.name,
+          name: o.name,
+          price: o.price,
+        });
       }
     }
-    const modifications = (line.modifier_ids || []).map((id) => {
-      const m = modifierLookup.get(id);
-      if (!m) {
+
+    const requestedIds = line.modifier_ids || [];
+    const modifications: { id: string; name: string; quantity: number; price: number }[] = [];
+    const perGroupCount = new Map<string, number>();
+    for (const id of requestedIds) {
+      const opt = optionToGroup.get(id);
+      if (!opt) {
         throw new Error(
-          `Modifier ${id} is not available for ${line.item_id} (${dish.name}).`
+          `Modifier ${id} is not available for ${line.item_id} (${dish.name}). ` +
+            `Look up valid modifier ids in get_menu output: items[].modifiers[].options[].id.`
         );
       }
-      return { id, name: m.name, quantity: 1, price: m.price };
-    });
+      modifications.push({ id, name: opt.name, quantity: 1, price: opt.price });
+      perGroupCount.set(opt.groupId, (perGroupCount.get(opt.groupId) || 0) + 1);
+    }
+
+    // Enforce min/max per modifier group. iiko rejects these with a generic
+    // 400 — we mirror the validation here so the caller (Claude/UI/etc.)
+    // gets a clear, actionable message before any side effects occur.
+    for (const g of dish.modifiers) {
+      const picked = perGroupCount.get(g.id) || 0;
+      if (picked < g.min) {
+        const optionsHint = g.options
+          .map((o) => `${o.name} (${o.id})`)
+          .join(", ");
+        throw new Error(
+          `Modifier group "${g.name}" on item "${dish.name}" requires ` +
+            `at least ${g.min} option(s) — you selected ${picked}. ` +
+            `Pick one from: ${optionsHint || "(no options available)"}. ` +
+            `Group id: ${g.id}.`
+        );
+      }
+      if (picked > g.max) {
+        throw new Error(
+          `Modifier group "${g.name}" on item "${dish.name}" allows at most ` +
+            `${g.max} option(s) — you selected ${picked}.`
+        );
+      }
+    }
+
     const modifiersTotal = modifications.reduce((s, m) => s + m.price, 0);
     // Per spec: "price (со стоимостью модификаций)".
     const linePrice = dish.price + modifiersTotal;
