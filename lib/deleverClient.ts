@@ -61,6 +61,8 @@ export interface MenuModifier {
 export interface MenuItem {
   id: string;
   category: string;
+  /** ID of the category this item belongs to. */
+  category_id: string;
   name: string;
   description: string;
   price: number;
@@ -72,14 +74,52 @@ export interface MenuItem {
   /** Unit for `measure` (Delever `measureUnit`), e.g. "г", "мл", "шт". */
   measure_unit: string;
   available: boolean;
+  /**
+   * Numeric stock if Delever returned one in `/menu/{id}/availability`. Absent
+   * key = no availability record (item is in stock by default). 0 = explicit
+   * stop. Positive number = remaining quantity.
+   */
+  stock?: number;
+  /** Optional product image URL (first one from Delever `images[]`). */
+  image_url?: string;
   modifiers: MenuModifier[];
+  sort_order?: number;
+}
+
+/** One category-level schedule slot (Delever spec). */
+export interface ScheduleSlot {
+  from: string;
+  till: string;
+  weekdays: string[];
+}
+
+export interface MenuCategory {
+  id: string;
+  name: string;
+  parent_id?: string;
+  sort_order?: number;
+  /** How many items in `items[]` belong to this category. */
+  item_count: number;
+  /** Resolved schedules for this category (empty if none). */
+  schedules: ScheduleSlot[];
+  /** Optional category icon URL. */
+  image_url?: string;
+}
+
+export interface MenuSummary {
+  categories_count: number;
+  items_count: number;
+  available_count: number;
+  unavailable_count: number;
 }
 
 export interface MenuResult {
   restaurant_id: string;
   language: LangCode;
   last_change: string;
+  categories: MenuCategory[];
   items: MenuItem[];
+  summary: MenuSummary;
 }
 
 export interface OrderItemInput {
@@ -441,11 +481,18 @@ export async function getMenu(params: GetMenuParams): Promise<MenuResult> {
   // Spec: GET /v1/custom-integration/menu/{restaurantId}/composition
   //   Content-Type: application/vnd.eats.menu.composition.v2+json
   //   → CustomIntegrationMenuCompositionV2
+  type ApiImage = { url?: string; updatedAt?: string; hash?: string };
   type ApiCategory = {
     id: string;
     parentId?: string;
     name: Localized;
     sortOrder?: number;
+    /**
+     * Per Delever V2 docs, categories carry an array of schedule keys that
+     * reference entries in the top-level `schedules` map.
+     */
+    schedules?: string[];
+    images?: ApiImage[];
   };
   type ApiModifier = {
     id: string;
@@ -472,11 +519,15 @@ export async function getMenu(params: GetMenuParams): Promise<MenuResult> {
     measureUnit?: string;
     sortOrder?: number;
     modifierGroups?: ApiModifierGroup[];
+    images?: ApiImage[];
   };
+  type ApiSchedule = { from: string; till: string; weekdays?: string[] };
   type ApiComposition = {
     categories?: ApiCategory[];
     items?: ApiItem[];
     lastChange?: string;
+    /** Map: schedule key → list of slot objects. */
+    schedules?: Record<string, ApiSchedule[]>;
   };
   // Spec: GET /v1/custom-integration/menu/{restaurantId}/availability
   //   → MenuAvailabilityV2 = { items:[{itemId,stock}], modifiers:[{modifierId,stock}] }
@@ -515,17 +566,64 @@ export async function getMenu(params: GetMenuParams): Promise<MenuResult> {
     categoryMap.set(c.id, pickLang(c.name, lang));
   }
 
+  const itemsPerCategory = new Map<string, number>();
+  for (const it of composition?.items || []) {
+    const cid = it.categoryId || "";
+    itemsPerCategory.set(cid, (itemsPerCategory.get(cid) || 0) + 1);
+  }
+
+  const schedulesMap = composition?.schedules || {};
+  const resolveSchedules = (keys?: string[]): ScheduleSlot[] => {
+    if (!keys?.length) return [];
+    const slots: ScheduleSlot[] = [];
+    for (const k of keys) {
+      const list = schedulesMap[k];
+      if (!list) continue;
+      for (const s of list) {
+        slots.push({
+          from: s.from,
+          till: s.till,
+          weekdays: s.weekdays || [],
+        });
+      }
+    }
+    return slots;
+  };
+
+  const categories: MenuCategory[] = (composition?.categories || []).map(
+    (c) => ({
+      id: c.id,
+      name: pickLang(c.name, lang),
+      parent_id: c.parentId,
+      sort_order: c.sortOrder,
+      item_count: itemsPerCategory.get(c.id) || 0,
+      schedules: resolveSchedules(c.schedules),
+      image_url: c.images?.[0]?.url,
+    })
+  );
+  categories.sort(
+    (a, b) =>
+      (a.sort_order ?? Number.MAX_SAFE_INTEGER) -
+        (b.sort_order ?? Number.MAX_SAFE_INTEGER) ||
+      a.name.localeCompare(b.name)
+  );
+
   const items: MenuItem[] = (composition?.items || []).map((it) => {
     const groups = it.modifierGroups || [];
+    const stock = itemStock.has(it.id) ? itemStock.get(it.id) : undefined;
     return {
       id: it.id,
       category: it.categoryId ? categoryMap.get(it.categoryId) || "" : "",
+      category_id: it.categoryId || "",
       name: pickLang(it.name, lang),
       description: it.description || "",
       price: it.price,
       measure: it.measure ?? 0,
       measure_unit: it.measureUnit || "",
       available: isItemAvailable(it.id),
+      stock,
+      image_url: it.images?.[0]?.url,
+      sort_order: it.sortOrder,
       modifiers: groups.map((g) => ({
         id: g.id,
         name: pickLang(g.name, lang),
@@ -543,12 +641,27 @@ export async function getMenu(params: GetMenuParams): Promise<MenuResult> {
       })),
     };
   });
+  items.sort(
+    (a, b) =>
+      (a.sort_order ?? Number.MAX_SAFE_INTEGER) -
+        (b.sort_order ?? Number.MAX_SAFE_INTEGER) ||
+      a.name.localeCompare(b.name)
+  );
+
+  const availableCount = items.filter((i) => i.available).length;
 
   return {
     restaurant_id: params.restaurant_id,
     language: lang,
     last_change: composition?.lastChange || new Date().toISOString(),
+    categories,
     items,
+    summary: {
+      categories_count: categories.length,
+      items_count: items.length,
+      available_count: availableCount,
+      unavailable_count: items.length - availableCount,
+    },
   };
 }
 
@@ -574,12 +687,14 @@ function formatMenu(
   const items: MenuItem[] = menu.items.map((it: MockMenuItem) => ({
     id: it.id,
     category: categoryMap.get(it.categoryId) || "",
+    category_id: it.categoryId,
     name: pickLang(it.name, lang),
     description: pickLang(it.description, lang),
     price: it.price,
     measure: it.weight,
     measure_unit: "г",
     available: !stockMap.has(it.id) || (stockMap.get(it.id) ?? 0) > 0,
+    stock: stockMap.has(it.id) ? stockMap.get(it.id) : undefined,
     modifiers: it.modifiers.map((m) => ({
       id: m.id,
       name: pickLang(m.name, lang),
@@ -592,11 +707,32 @@ function formatMenu(
       })),
     })),
   }));
+  const itemsPerCategoryMock = new Map<string, number>();
+  for (const it of menu.items) {
+    itemsPerCategoryMock.set(
+      it.categoryId,
+      (itemsPerCategoryMock.get(it.categoryId) || 0) + 1
+    );
+  }
+  const categories: MenuCategory[] = menu.categories.map((c) => ({
+    id: c.id,
+    name: pickLang(c.name, lang),
+    item_count: itemsPerCategoryMock.get(c.id) || 0,
+    schedules: [],
+  }));
+  const availableCount = items.filter((i) => i.available).length;
   return {
     restaurant_id: menu.restaurantId,
     language: lang,
     last_change: menu.lastChange,
+    categories,
     items,
+    summary: {
+      categories_count: categories.length,
+      items_count: items.length,
+      available_count: availableCount,
+      unavailable_count: items.length - availableCount,
+    },
   };
 }
 

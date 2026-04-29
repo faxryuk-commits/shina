@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { revalidatePath } from "next/cache";
 import { getDeleverAccessToken, resetDeleverAuthCache } from "@/lib/deleverAuth";
 import {
@@ -5,6 +6,16 @@ import {
   type RestaurantSummary,
 } from "@/lib/deleverClient";
 import MonitorPanel from "./_components/MonitorPanel";
+import {
+  Card,
+  EmptyState,
+  ErrorBox,
+  Grid,
+  KV,
+  SectionTitle,
+  codeStyle,
+  inlineCodeStyle,
+} from "./_components/ui";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -303,101 +314,6 @@ export default async function Home() {
 
 /* ------------------------------ UI atoms ------------------------------- */
 
-function SectionTitle({
-  children,
-  inline,
-}: {
-  children: React.ReactNode;
-  inline?: boolean;
-}) {
-  return (
-    <h2
-      style={{
-        fontSize: 14,
-        fontWeight: 600,
-        textTransform: "uppercase",
-        letterSpacing: 1.2,
-        color: "#a3a3a3",
-        margin: inline ? 0 : "0 0 12px",
-      }}
-    >
-      {children}
-    </h2>
-  );
-}
-
-function Grid({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-        gap: 12,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function Card({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      style={{
-        border: "1px solid #1f1f1f",
-        background: "#111",
-        borderRadius: 12,
-        padding: 16,
-      }}
-    >
-      <div
-        style={{
-          fontSize: 12,
-          textTransform: "uppercase",
-          letterSpacing: 1,
-          color: "#737373",
-          marginBottom: 10,
-        }}
-      >
-        {title}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function KV({ k, v }: { k: string; v: string }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        gap: 12,
-        padding: "4px 0",
-        fontSize: 13,
-        borderBottom: "1px dashed #1f1f1f",
-      }}
-    >
-      <span style={{ opacity: 0.6 }}>{k}</span>
-      <span
-        style={{
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-          textAlign: "right",
-          wordBreak: "break-all",
-        }}
-      >
-        {v}
-      </span>
-    </div>
-  );
-}
-
 function StatusRow({
   label,
   ok,
@@ -446,53 +362,21 @@ function StatusRow({
   );
 }
 
-function ErrorBox({ text }: { text: string }) {
-  return (
-    <pre
-      style={{
-        marginTop: 12,
-        padding: 10,
-        background: "#2a0d0d",
-        border: "1px solid #5c1a1a",
-        borderRadius: 8,
-        color: "#fca5a5",
-        fontSize: 12,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-      }}
-    >
-      {text}
-    </pre>
-  );
-}
-
-function EmptyState({ text }: { text: string }) {
-  return (
-    <div
-      style={{
-        padding: 24,
-        textAlign: "center",
-        border: "1px dashed #2a2a2a",
-        borderRadius: 12,
-        color: "#737373",
-        fontSize: 14,
-      }}
-    >
-      {text}
-    </div>
-  );
-}
-
 function RestaurantCard({ r }: { r: RestaurantSummary }) {
   const dotColor = r.online ? "#10b981" : "#525252";
   const hasDetails = r.details_available;
   return (
-    <div
+    <Link
+      href={`/restaurants/${r.id}`}
       style={{
+        display: "block",
         border: `1px solid ${hasDetails ? "#1f1f1f" : "#3a2d12"}`,
         background: hasDetails ? "#111" : "#161208",
         borderRadius: 12,
         padding: 14,
+        textDecoration: "none",
+        color: "inherit",
+        transition: "border-color 0.15s ease, transform 0.05s ease",
       }}
     >
       <div
@@ -546,36 +430,39 @@ function RestaurantCard({ r }: { r: RestaurantSummary }) {
       </div>
       <div
         style={{
-          fontSize: 11,
-          opacity: 0.5,
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 8,
         }}
       >
-        {r.id}
-        {hasDetails && ` · ${r.lat.toFixed(4)}, ${r.lng.toFixed(4)}`}
+        <div
+          style={{
+            fontSize: 11,
+            opacity: 0.5,
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {r.id}
+          {hasDetails && ` · ${r.lat.toFixed(4)}, ${r.lng.toFixed(4)}`}
+        </div>
+        <span
+          style={{
+            fontSize: 11,
+            color: "#737373",
+            letterSpacing: 0.4,
+            flexShrink: 0,
+          }}
+        >
+          Меню →
+        </span>
       </div>
-    </div>
+    </Link>
   );
 }
-
-const codeStyle: React.CSSProperties = {
-  display: "inline-block",
-  padding: "6px 10px",
-  borderRadius: 6,
-  background: "#1a1a1a",
-  border: "1px solid #2a2a2a",
-  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-  fontSize: 13,
-};
-
-const inlineCodeStyle: React.CSSProperties = {
-  padding: "1px 6px",
-  borderRadius: 4,
-  background: "#1a1a1a",
-  border: "1px solid #2a2a2a",
-  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-  fontSize: 12,
-};
 
 const EXPOSED_TOOLS: { name: string; desc: string }[] = [
   { name: "search_restaurants", desc: "list branches + online status" },
